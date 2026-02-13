@@ -329,12 +329,13 @@ where
                 let this = self.get_mut();
                 let stream =
                     Stream::new(&mut this.io, &mut this.session).set_eof(!this.state.readable());
-
+                tracing::info!("client side reading");
                 match stream.poll_fill_buf(cx) {
                     Poll::Ready(Ok(buf)) => {
                         if buf.is_empty() {
                             this.state.shutdown_read();
                         }
+                        tracing::info!("client read something");
 
                         Poll::Ready(Ok(buf))
                     }
