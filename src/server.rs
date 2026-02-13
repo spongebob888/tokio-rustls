@@ -239,6 +239,14 @@ where
             }
         };
         f(&mut conn);
+        if conn.early_data().is_some() {
+            return Accept(MidHandshake::Handshaking(TlsStream {
+                session: conn,
+                io: self.io,
+                state: TlsState::EarlyData(0, vec![0u8; 8192]),
+                need_flush: false,
+            }));
+        }
 
         Accept(MidHandshake::Handshaking(TlsStream {
             session: conn,
@@ -332,7 +340,7 @@ impl<IO> IoSession for TlsStream<IO> {
 
     #[inline]
     fn skip_handshake(&self) -> bool {
-        false
+        self.state.is_early_data()
     }
 
     #[inline]
@@ -373,9 +381,10 @@ where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
     fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
-        match self.state {
+        let this = self.get_mut();
+        let readble = this.state.readable();
+        match this.state {
             TlsState::Stream | TlsState::WriteShutdown => {
-                let this = self.get_mut();
                 let stream =
                     Stream::new(&mut this.io, &mut this.session).set_eof(!this.state.readable());
 
@@ -396,7 +405,43 @@ where
             }
             TlsState::ReadShutdown | TlsState::FullyShutdown => Poll::Ready(Ok(&[])),
             #[cfg(feature = "early-data")]
-            ref s => unreachable!("server TLS can not hit this state: {:?}", s),
+            TlsState::EarlyData(mut stored, ref mut buf) => {
+                let mut stream = Stream::new(&mut this.io, &mut this.session).set_eof(!readble);
+                let mut is_pending = false;
+
+                // stream.handshake(cx);
+
+                stream.session.process_new_packets();
+                while stream.session.wants_read() {
+                    match stream.read_io(cx) {
+                        Poll::Ready(Ok(0)) => {
+                            break;
+                        }
+                        Poll::Ready(Ok(_)) => {
+                            tracing::info!("early data io read");
+                        }
+                        Poll::Pending => {
+                            is_pending = true;
+                            break;
+                        }
+                        Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                    }
+                }
+                if let Some(mut early_data) = stream.session.early_data() {
+                    use std::io::Read;
+
+                    match early_data.read(&mut buf[stored..]) {
+                        Ok(n) => {
+                            stored += n;
+                            tracing::info!("earlydata received by server:{n}");
+                            return Poll::Ready(Ok(&buf[stored - n..stored]));
+                        }
+                        Err(_) => todo!(),
+                    }
+                }
+
+                todo!()
+            }
         }
     }
 

@@ -14,10 +14,13 @@ exclude = ["/.github", "/examples", "/scripts", "/tests/"]
 
 [dependencies]
 rustls = { version = "0.23.27", default-features = false, features = ["std"] }
-tokio = "1.0"
+#rustls = { path = "../rustls-jls/rustls", package="rustls-jls", default-features = false, features = ["std"] }
 
+tokio = "1.0"
+tracing = "0.1.44"
+tracing-subscriber = "0.3.22"
 [features]
-default = ["logging", "tls12", "aws_lc_rs"]
+default = ["logging", "tls12", "aws_lc_rs", "early-data"]
 aws_lc_rs = ["rustls/aws_lc_rs"]
 aws-lc-rs = ["aws_lc_rs"] # Alias because Cargo features commonly use `-`
 brotli = ["rustls/brotli"]
@@ -28,10 +31,12 @@ ring = ["rustls/ring"]
 tls12 = ["rustls/tls12"]
 zlib = ["rustls/zlib"]
 
+
 [dev-dependencies]
 argh = "0.1.1"
 futures-util = "0.3.1"
 lazy_static = "1.1"
 rcgen = { version = "0.14", features = ["pem"] }
 tokio = { version = "1.0", features = ["full"] }
+
 webpki-roots = "1"

@@ -20,9 +20,10 @@ async fn send<S: AsyncRead + AsyncWrite + Unpin>(
     vectored: bool,
 ) -> io::Result<(TlsStream<S>, Vec<u8>)> {
     let connector = TlsConnector::from(config).early_data(true);
+    tracing::info!("connecting to server at {:?}", addr);
     let stream = wrapper(TcpStream::connect(&addr).await?);
     let domain = ServerName::try_from("foobar.com").unwrap();
-
+    tracing::info!("connected to server at {:?}, starting TLS handshake", addr);
     let mut stream = connector.connect(domain, stream).await?;
     utils::write(&mut stream, data, vectored).await?;
     stream.flush().await?;
@@ -30,6 +31,7 @@ async fn send<S: AsyncRead + AsyncWrite + Unpin>(
 
     let mut buf = Vec::new();
     stream.read_to_end(&mut buf).await?;
+    tracing::info!("received response from server: {:?}", String::from_utf8_lossy(&buf));
 
     Ok((stream, buf))
 }
@@ -53,6 +55,7 @@ async fn test_0rtt_impl<S: AsyncRead + AsyncWrite + Unpin>(
     wrapper: impl Fn(TcpStream) -> S,
     vectored: bool,
 ) -> io::Result<()> {
+tracing_subscriber::fmt::init();
     let (mut server, mut client) = utils::make_configs();
     server.max_early_data_size = 8192;
     let server = Arc::new(server);
