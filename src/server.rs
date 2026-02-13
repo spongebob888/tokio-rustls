@@ -383,7 +383,8 @@ where
     fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
         let this = self.get_mut();
         let readble = this.state.readable();
-        match this.state {
+        let state = std::mem::replace(&mut this.state, TlsState::Stream);
+        match state {
             TlsState::Stream | TlsState::WriteShutdown => {
                 let stream =
                     Stream::new(&mut this.io, &mut this.session).set_eof(!this.state.readable());
@@ -405,7 +406,7 @@ where
             }
             TlsState::ReadShutdown | TlsState::FullyShutdown => Poll::Ready(Ok(&[])),
             #[cfg(feature = "early-data")]
-            TlsState::EarlyData(ref mut stored, ref mut buf) => {
+            TlsState::EarlyData(mut stored, mut buf) => {
                 let mut stream = Stream::new(&mut this.io, &mut this.session).set_eof(!readble);
                 let mut is_pending = false;
 
@@ -440,18 +441,20 @@ where
                 if let Some(mut early_data) = stream.session.early_data() {
                     use std::io::Read;
 
-                    match early_data.read(&mut buf[*stored..]) {
-                        //Ok(0) => this.state = TlsState::Stream,
+                    match early_data.read(&mut buf[stored..]) {
+                        Ok(0) => this.state = TlsState::Stream,
                         Ok(n) => {
-                            *stored += n;
+                            is_pending = false;
+                            stored += n;
+                            let ret = &buf[stored - n..stored];
+                            this.state = TlsState::EarlyData(stored, buf);
                             tracing::info!("earlydata received by server:{n}");
-                            return Poll::Ready(Ok(&buf[*stored - n..*stored]));
+                            return Poll::Ready(Ok(ret));
                         }
                         Err(_) => todo!(),
                     }
                 }
-
-                todo!()
+                Poll::Pending
             }
         }
     }
@@ -505,18 +508,18 @@ where
         let this = self.get_mut();
         let mut stream =
             Stream::new(&mut this.io, &mut this.session).set_eof(!this.state.readable());
-        #[cfg(feature = "early-data")]
-        {
-            if this.state.is_early_data() {
-                tracing::info!("flushing early data");
-                while stream.session.is_handshaking() {
-                    ready!(stream.handshake(cx))?;
-                }
+        // #[cfg(feature = "early-data")]
+        // {
+        //     if this.state.is_early_data() {
+        //         tracing::info!("flushing early data");
+        //         while stream.session.is_handshaking() {
+        //             ready!(stream.handshake(cx))?;
+        //         }
 
-                tracing::info!("server handshaked");
-                this.state = TlsState::Stream;
-            }
-        }
+        //         tracing::info!("server handshaked");
+        //         this.state = TlsState::Stream;
+        //     }
+        // }
         stream.as_mut_pin().poll_flush(cx)
     }
 
