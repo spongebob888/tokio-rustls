@@ -454,6 +454,7 @@ where
                             this.state = TlsState::Stream;
 
                             tracing::info!("earlydata received by server:0");
+                            // Wake to do 1rtt data reading
                             cx.waker().wake_by_ref();
                             // There may be outstanding handshake data not sent
                             ready!(stream.write_io(cx))?;

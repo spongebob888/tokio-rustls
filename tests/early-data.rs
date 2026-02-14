@@ -55,7 +55,7 @@ async fn test_0rtt_impl<S: AsyncRead + AsyncWrite + Unpin>(
     wrapper: impl Fn(TcpStream) -> S,
     vectored: bool,
 ) -> io::Result<()> {
-tracing_subscriber::fmt::init();
+    //tracing_subscriber::fmt::init();
     let (mut server, mut client) = utils::make_configs();
     server.max_early_data_size = 8192;
     let server = Arc::new(server);
