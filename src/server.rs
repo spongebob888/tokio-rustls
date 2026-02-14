@@ -455,8 +455,8 @@ where
 
                             tracing::info!("earlydata received by server:0");
                             cx.waker().wake_by_ref();
-
-                            ready!(stream.handshake(cx))?;
+                            // There may be outstanding handshake data not sent
+                            ready!(stream.write_io(cx))?;
                             return Poll::Pending;
                         }
                         Ok(n) => {
