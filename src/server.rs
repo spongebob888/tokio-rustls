@@ -529,18 +529,7 @@ where
         let this = self.get_mut();
         let mut stream =
             Stream::new(&mut this.io, &mut this.session).set_eof(!this.state.readable());
-        #[cfg(feature = "early-data")]
-        {
-            if this.state.is_early_data() {
-                tracing::info!("flushing early data");
-                while stream.session.is_handshaking() {
-                    ready!(stream.handshake(cx))?;
-                }
 
-                tracing::info!("server handshaked");
-                this.state = TlsState::Stream;
-            }
-        }
         stream.as_mut_pin().poll_flush(cx)
     }
 
