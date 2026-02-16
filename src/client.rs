@@ -165,6 +165,7 @@ impl<IO> Connect<IO> {
             MidHandshake::SendAlert { io, .. } => Some(io),
             MidHandshake::Error { io, .. } => Some(io),
             MidHandshake::End => None,
+            MidHandshake::JlsForward { io, .. } => Some(io),
         }
     }
 
@@ -174,6 +175,7 @@ impl<IO> Connect<IO> {
             MidHandshake::SendAlert { io, .. } => Some(io),
             MidHandshake::Error { io, .. } => Some(io),
             MidHandshake::End => None,
+            MidHandshake::JlsForward { io, .. } => Some(io),
         }
     }
 }

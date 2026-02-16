@@ -98,7 +98,11 @@ where
     }
 
     pub(crate) fn read_io(&mut self, cx: &mut Context) -> Poll<io::Result<usize>> {
-        let mut reader = SyncReadAdapter { io: self.io, cx };
+        let mut reader = SyncReadAdapter {
+            io: self.io,
+            cx,
+            backup: None,
+        };
 
         let n = match self.session.read_tls(&mut reader) {
             Ok(n) => n,
@@ -382,6 +386,7 @@ where
 pub(crate) struct SyncReadAdapter<'a, 'b, T> {
     pub(crate) io: &'a mut T,
     pub(crate) cx: &'a mut Context<'b>,
+    pub(crate) backup: Option<&'a mut Vec<u8>>,
 }
 
 impl<T: AsyncRead + Unpin> Read for SyncReadAdapter<'_, '_, T> {
@@ -389,7 +394,12 @@ impl<T: AsyncRead + Unpin> Read for SyncReadAdapter<'_, '_, T> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let mut buf = ReadBuf::new(buf);
         match Pin::new(&mut self.io).poll_read(self.cx, &mut buf) {
-            Poll::Ready(Ok(())) => Ok(buf.filled().len()),
+            Poll::Ready(Ok(())) => {
+                if let Some(ref mut backup) = self.backup {
+                    backup.extend_from_slice(buf.filled());
+                }
+                Ok(buf.filled().len())
+            }
             Poll::Ready(Err(err)) => Err(err),
             Poll::Pending => Err(io::ErrorKind::WouldBlock.into()),
         }

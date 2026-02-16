@@ -7,8 +7,9 @@ use std::sync::Arc;
 use std::thread;
 
 use rustls::jls::{JlsClientConfig, JlsServerConfig};
-use rustls::pki_types::ServerName;
-use rustls::{self, ClientConfig, ServerConnection, Stream};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls::{self, ClientConfig, RootCertStore, ServerConfig, ServerConnection, Stream};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
@@ -26,7 +27,7 @@ async fn send<S: AsyncRead + AsyncWrite + Unpin>(
     stream.set_nodelay(true)?;
     let stream = wrapper(stream);
 
-    let domain = ServerName::try_from("foobar.com").unwrap();
+    let domain = ServerName::try_from("cloudflare.com").unwrap();
 
     let mut stream = connector.connect(domain, stream).await?;
     utils::write(&mut stream, data, vectored).await?;
@@ -42,20 +43,75 @@ async fn send<S: AsyncRead + AsyncWrite + Unpin>(
 #[tokio::test]
 async fn test_0rtt_impl() {
     tracing_subscriber::fmt::init();
-    let (mut server, mut client) = utils::make_configs();
+    let (mut server, mut client) = make_configs();
     let jls_client_config = JlsClientConfig::default()
-        .set_user("123".into(), "123".into())
+        .set_user("13".into(), "123".into())
         .enable(true);
     client.jls_config = jls_client_config;
     server.jls_config = JlsServerConfig::default()
         .add_user("123".into(), "123".into())
+        .with_upstream_addr("127.0.0.1:5443".into())
+        .with_server_name("cloudflare.com".into())
         .enable(true)
         .into();
     server.max_early_data_size = 8192;
+    let server_port = 4443;
+    surve_server(&server, server_port).await;
+    server.jls_config = server.jls_config.as_ref().clone().enable(false).into();
+
+    surve_server(&server, 5443).await;
     let server = Arc::new(server);
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    client.enable_early_data = true;
+    let client = Arc::new(client);
+    let addr = SocketAddr::from(([127, 0, 0, 1], server_port));
+
+    let wrapper = |s| s;
+    tracing::warn!("client sending");
+    let (mut io, buf) = send(client.clone(), addr, &wrapper, b"hello", false)
+        .await
+        .map_err(|x| tracing::error!("client send error:{}", x))
+        .unwrap();
+    assert!(!io.get_ref().1.is_early_data_accepted());
+
+    tracing::info!("client received: {}", String::from_utf8_lossy(&buf));
+    assert_eq!(buf, b"5443");
+
+    tracing::warn!("client sending");
+    let (mut io, buf) = send(client, addr, wrapper, b"hello", false).await.unwrap();
+
+    assert!(io.get_ref().1.is_early_data_accepted());
+    tracing::info!("client received: {}", String::from_utf8_lossy(&buf));
+    assert_eq!(buf, b"5443");
+}
+
+pub(crate) fn make_configs() -> (ServerConfig, ClientConfig) {
+    let cert = rcgen::generate_simple_self_signed(vec!["cloudflare.com".to_string()]).unwrap();
+    let cert_der = cert.cert;
+    let key_der = cert.signing_key;
+
+    let sconfig = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der.clone().into()], key_der.into())
+        .unwrap();
+
+    let mut client_root_cert_store = RootCertStore::empty();
+    client_root_cert_store.add(cert_der.into()).unwrap();
+
+    let cconfig = ClientConfig::builder()
+        .with_root_certificates(client_root_cert_store)
+        .with_no_client_auth();
+
+    (sconfig, cconfig)
+}
+
+async fn surve_server(server: &ServerConfig, port: u16) -> u16 {
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
+        .await
+        .unwrap();
     let server_port = listener.local_addr().unwrap().port();
+
+    let server = Arc::new(server.clone());
     tokio::spawn(async move {
         loop {
             let (mut sock, _addr) = listener.accept().await.unwrap();
@@ -70,15 +126,18 @@ async fn test_0rtt_impl() {
                 let ch = start.client_hello();
                 tracing::info!("receive a new conn:{:?}", ch);
                 //let mut buf = Vec::new();
-                let mut stream = start
-                    .into_stream_with(server, |x| {
-                        // if let Some(mut earyly_data) = x.early_data() {
-                        //     let n = earyly_data.read_to_end(&mut buf).unwrap();
-                        //     tracing::info!("early data reveived {n} bytes:{:?}", buf);
-                        // }
-                    })
-                    .await
-                    .unwrap();
+                let mut stream = start.into_stream_with(server, |x| {
+                    // if let Some(mut earyly_data) = x.early_data() {
+                    //     let n = earyly_data.read_to_end(&mut buf).unwrap();
+                    //     tracing::info!("early data reveived {n} bytes:{:?}", buf);
+                    // }
+                });
+                if !stream.is_jls() {
+                    tracing::info!("start jls forwarding");
+                    stream.start_jls_forward().await.unwrap();
+                    return;
+                }
+                let mut stream = stream.await.unwrap();
                 // if let Some(mut earyly_data) = stream.get_mut().1.early_data() {
                 //     let n = earyly_data.read_to_end(&mut buf).unwrap();
                 //     tracing::info!("early data reveived {n} bytes:{:?}", buf);
@@ -91,7 +150,10 @@ async fn test_0rtt_impl() {
                 tracing::info!("server received: {}", String::from_utf8_lossy(&buf));
                 assert_eq!(buf, b"hello");
 
-                stream.write_all(b"bye").await.unwrap();
+                stream
+                    .write_all(format!("{}", port).as_bytes())
+                    .await
+                    .unwrap();
                 // if let Some(mut early_data) = conn.early_data() {
                 //     let mut buf = Vec::new();
                 //     early_data.read_to_end(&mut buf).unwrap();
@@ -117,29 +179,7 @@ async fn test_0rtt_impl() {
             });
         }
     });
-
-    client.enable_early_data = true;
-    let client = Arc::new(client);
-    let addr = SocketAddr::from(([127, 0, 0, 1], server_port));
-
-    let wrapper = |s| s;
-    tracing::warn!("client sending");
-    let (mut io, buf) = send(client.clone(), addr, &wrapper, b"hello", false)
-        .await
-        .map_err(|x| tracing::error!("client send error:{}", x))
-        .unwrap();
-    assert!(!io.get_ref().1.is_early_data_accepted());
-
-    tracing::info!("client received: {}", String::from_utf8_lossy(&buf));
-    assert_eq!(buf, b"bye");
-
-    tracing::warn!("client sending");
-    let (mut io, buf) = send(client, addr, wrapper, b"hello", false).await.unwrap();
-
-    assert!(io.get_ref().1.is_early_data_accepted());
-    tracing::info!("client received: {}", String::from_utf8_lossy(&buf));
-    assert_eq!(buf, b"bye");
+    return port;
 }
 
-// Include `utils` module
 include!("utils.rs");

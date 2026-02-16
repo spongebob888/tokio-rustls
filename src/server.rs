@@ -8,9 +8,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use rustls::server::AcceptedAlert;
+use rustls::server::{AcceptedAlert, ProducesTickets};
 use rustls::{ServerConfig, ServerConnection};
-use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::net::TcpStream;
 
 use crate::common::{IoSession, MidHandshake, Stream, SyncReadAdapter, SyncWriteAdapter, TlsState};
 
@@ -71,6 +72,7 @@ pub struct LazyConfigAcceptor<IO> {
     acceptor: rustls::server::Acceptor,
     io: Option<IO>,
     alert: Option<(rustls::Error, AcceptedAlert)>,
+    fallback_buf: Option<Vec<u8>>,
 }
 
 impl<IO> LazyConfigAcceptor<IO>
@@ -83,6 +85,7 @@ where
             acceptor,
             io: Some(io),
             alert: None,
+            fallback_buf: Some(vec![0u8; 0]),
         }
     }
 
@@ -167,7 +170,11 @@ where
                 };
             }
 
-            let mut reader = SyncReadAdapter { io, cx };
+            let mut reader = SyncReadAdapter {
+                io,
+                cx,
+                backup: this.fallback_buf.as_mut(),
+            };
             match this.acceptor.read_tls(&mut reader) {
                 Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()).into(),
                 Ok(_) => {}
@@ -178,7 +185,11 @@ where
             match this.acceptor.accept() {
                 Ok(Some(accepted)) => {
                     let io = this.io.take().unwrap();
-                    return Poll::Ready(Ok(StartHandshake { accepted, io }));
+                    return Poll::Ready(Ok(StartHandshake {
+                        accepted,
+                        io,
+                        fallback_buf: this.fallback_buf.take(),
+                    }));
                 }
                 Ok(None) => {}
                 Err((err, alert)) => {
@@ -200,6 +211,7 @@ where
 pub struct StartHandshake<IO> {
     pub accepted: rustls::server::Accepted,
     pub io: IO,
+    pub fallback_buf: Option<Vec<u8>>,
 }
 
 impl<IO> StartHandshake<IO>
@@ -211,6 +223,7 @@ where
         Self {
             accepted,
             io: transport,
+            fallback_buf: None,
         }
     }
 
@@ -226,6 +239,7 @@ where
     where
         F: FnOnce(&mut ServerConnection),
     {
+        let rate_limit = config.jls_config.rate_limit.clone();
         let mut conn = match self.accepted.into_connection(config) {
             Ok(conn) => conn,
             Err((error, alert)) => {
@@ -238,6 +252,21 @@ where
                 });
             }
         };
+        match &conn.jls_authed {
+            rustls::jls::JlsState::AuthSuccess(jls_user) => {
+                tracing::debug!("JLS authenicated:{}", jls_user.user_iv);
+            }
+            rustls::jls::JlsState::AuthFailed((addr)) => {
+                return Accept(MidHandshake::JlsForward {
+                    io: self.io,
+                    upstream: addr.clone(),
+                    rate_limit: rate_limit,
+                    clienthello: self.fallback_buf.unwrap(),
+                });
+            }
+            rustls::jls::JlsState::NotAuthed => unreachable!(),
+            rustls::jls::JlsState::Disabled => (),
+        }
         f(&mut conn);
         if conn.early_data().is_some() {
             return Accept(MidHandshake::Handshaking(TlsStream {
@@ -273,6 +302,7 @@ impl<IO> Accept<IO> {
             MidHandshake::SendAlert { io, .. } => Some(io),
             MidHandshake::Error { io, .. } => Some(io),
             MidHandshake::End => None,
+            MidHandshake::JlsForward { io, .. } => Some(io),
         }
     }
 
@@ -282,6 +312,14 @@ impl<IO> Accept<IO> {
             MidHandshake::SendAlert { io, .. } => Some(io),
             MidHandshake::Error { io, .. } => Some(io),
             MidHandshake::End => None,
+            MidHandshake::JlsForward { io, .. } => Some(io),
+        }
+    }
+    /// Return true
+    pub fn is_jls(&self) -> bool {
+        match &self.0 {
+            MidHandshake::JlsForward { .. } => false,
+            _ => true,
         }
     }
 }
@@ -292,6 +330,27 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Future for Accept<IO> {
     #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         Pin::new(&mut self.0).poll(cx).map_err(|(err, _)| err)
+    }
+}
+impl<IO: AsyncRead + AsyncWrite + Unpin> Accept<IO> {
+    pub async fn start_jls_forward(self) -> io::Result<()> {
+        if let MidHandshake::JlsForward {
+            mut io,
+            upstream,
+            rate_limit,
+            clienthello,
+        } = self.0
+        {
+            let upstream = upstream.ok_or(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "upstream address not provided, jls forwarding stopped",
+            ))?;
+            let mut upstream: TcpStream = TcpStream::connect(upstream).await?;
+            tracing::info!("upstream connected");
+            upstream.write_all(&clienthello).await?;
+            tokio::io::copy_bidirectional(&mut io, &mut upstream).await?;
+        }
+        Ok(())
     }
 }
 
