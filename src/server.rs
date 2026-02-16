@@ -272,7 +272,7 @@ where
             return Accept(MidHandshake::Handshaking(TlsStream {
                 session: conn,
                 io: self.io,
-                state: TlsState::EarlyData(0, vec![0u8; 1024]),
+                state: TlsState::EarlyData(0, vec![0u8; 0]),
                 need_flush: false,
             }));
         }
@@ -430,6 +430,8 @@ where
         let data = ready!(self.as_mut().poll_fill_buf(cx))?;
         let len = data.len().min(buf.remaining());
         buf.put_slice(&data[..len]);
+
+                        tracing::info!("poll read by server:{}", String::from_utf8_lossy(buf.filled()));
         self.consume(len);
         Poll::Ready(Ok(()))
     }
@@ -473,7 +475,16 @@ where
                 Poll::Ready(Ok(&[]))
             }
             #[cfg(feature = "early-data")]
-            TlsState::EarlyData(mut stored, mut buf) => {
+            TlsState::EarlyData(mut consumed, mut buf) => {
+                if consumed < buf.len() {
+                    this.state = TlsState::EarlyData(consumed, buf);
+                    match this.state {
+                            TlsState::EarlyData(ref consumed, ref buf) => {
+                               return Poll::Ready(Ok(&buf[*consumed..]));
+                    }
+                    _ => unreachable!()
+                }
+                }
                 let mut stream = Stream::new(&mut this.io, &mut this.session).set_eof(!readble);
                 let mut is_pending = false;
 
@@ -508,7 +519,7 @@ where
                 if let Some(mut early_data) = stream.session.early_data() {
                     use std::io::Read;
 
-                    match early_data.read(&mut buf[stored..]) {
+                    match early_data.read_to_end(&mut buf) {
                         Ok(0) => {
                             this.state = TlsState::Stream;
 
@@ -521,12 +532,15 @@ where
                         }
                         Ok(n) => {
                             is_pending = false;
-                            stored += n;
+                            consumed = 0;
+                            buf.resize(n, 0);
                             tracing::info!("earlydata received by server:{n}");
-                            this.state = TlsState::EarlyData(stored, buf);
+                            this.state = TlsState::EarlyData(consumed, buf);
                             match this.state {
                                 TlsState::EarlyData(_, ref buf) => {
-                                    return Poll::Ready(Ok(&buf[stored - n..stored]))
+
+                                    tracing::info!("earlydata received by server:{}", String::from_utf8_lossy(&buf));
+                                    return Poll::Ready(Ok(&buf))
                                 }
                                 _ => unreachable!(),
                             }
@@ -541,7 +555,7 @@ where
 
     fn consume(mut self: Pin<&mut Self>, amt: usize) {
         if let TlsState::EarlyData(ref mut n, _) = self.as_mut().state {
-            *n -= amt;
+            *n += amt;
         } else {
             self.session.reader().consume(amt);
         }

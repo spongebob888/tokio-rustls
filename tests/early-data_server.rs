@@ -29,6 +29,7 @@ async fn send<S: AsyncRead + AsyncWrite + Unpin>(
 
     let mut stream = connector.connect(domain, stream).await?;
     utils::write(&mut stream, data, vectored).await?;
+        utils::write(&mut stream, b"second msg fdfdfd fd", vectored).await?;
     stream.flush().await?;
     stream.shutdown().await?;
 
@@ -40,7 +41,7 @@ async fn send<S: AsyncRead + AsyncWrite + Unpin>(
 
 #[tokio::test]
 async fn test_0rtt_impl() {
-    //tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt::init();
     let (mut server, mut client) = utils::make_configs();
     server.max_early_data_size = 8192;
     let server = Arc::new(server);
@@ -122,7 +123,7 @@ async fn test_0rtt_impl() {
     tracing::info!("client received: {}", String::from_utf8_lossy(&buf));
 
     tracing::warn!("client sending");
-    let (mut io, buf) = send(client, addr, wrapper, b"world!", false).await.unwrap();
+    let (mut io, buf) = send(client, addr, wrapper, b"world kjjlk jlkj jklj j!", false).await.unwrap();
 
     assert!(io.get_ref().1.is_early_data_accepted());
     tracing::info!("client received: {}", String::from_utf8_lossy(&buf));
