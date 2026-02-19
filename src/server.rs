@@ -431,7 +431,10 @@ where
         let len = data.len().min(buf.remaining());
         buf.put_slice(&data[..len]);
 
-                        tracing::info!("poll read by server:{}", String::from_utf8_lossy(buf.filled()));
+        tracing::info!(
+            "poll read by server:{}",
+            String::from_utf8_lossy(buf.filled())
+        );
         self.consume(len);
         Poll::Ready(Ok(()))
     }
@@ -479,11 +482,11 @@ where
                 if consumed < buf.len() {
                     this.state = TlsState::EarlyData(consumed, buf);
                     match this.state {
-                            TlsState::EarlyData(ref consumed, ref buf) => {
-                               return Poll::Ready(Ok(&buf[*consumed..]));
+                        TlsState::EarlyData(ref consumed, ref buf) => {
+                            return Poll::Ready(Ok(&buf[*consumed..]));
+                        }
+                        _ => unreachable!(),
                     }
-                    _ => unreachable!()
-                }
                 }
                 let mut stream = Stream::new(&mut this.io, &mut this.session).set_eof(!readble);
                 let mut is_pending = false;
@@ -538,9 +541,11 @@ where
                             this.state = TlsState::EarlyData(consumed, buf);
                             match this.state {
                                 TlsState::EarlyData(_, ref buf) => {
-
-                                    tracing::info!("earlydata received by server:{}", String::from_utf8_lossy(&buf));
-                                    return Poll::Ready(Ok(&buf))
+                                    tracing::info!(
+                                        "earlydata received by server:{}",
+                                        String::from_utf8_lossy(&buf)
+                                    );
+                                    return Poll::Ready(Ok(&buf));
                                 }
                                 _ => unreachable!(),
                             }
