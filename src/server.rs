@@ -504,6 +504,20 @@ where
                         )))
                     }
                 }
+                while stream.session.wants_write() {
+                    match stream.write_io(cx) {
+                        Poll::Ready(Ok(0)) => {
+                            break;
+                        }
+                        Poll::Ready(Ok(_)) => {
+                            tracing::info!("write handshake data");
+                        }
+                        Poll::Pending => {
+                            break;
+                        }
+                        Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                    }
+                }
                 while stream.session.wants_read() {
                     match stream.read_io(cx) {
                         Poll::Ready(Ok(0)) => {
@@ -528,15 +542,16 @@ where
                             this.state = if stream.session.is_handshaking() {
                                 TlsState::EarlyData(consumed, buf)
                             } else {
+                                tracing::debug!("early data finished");
+                                // Wake to do 1rtt data reading
                                 cx.waker().wake_by_ref();
+                     
                                 TlsState::Stream
                             };
       
                             tracing::info!("earlydata received by server:0");
-                            // Wake to do 1rtt data reading
-
                             // There may be outstanding handshake data not sent
-                            ready!(stream.write_io(cx))?;
+                            //ready!(stream.write_io(cx))?;
                             return Poll::Pending;
                         }
                         Ok(n) => {
