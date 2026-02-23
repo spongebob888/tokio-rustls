@@ -422,6 +422,7 @@ impl<IO> AsyncRead for TlsStream<IO>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
+    #[tracing::instrument(skip(self, cx, buf))]
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -594,6 +595,7 @@ where
 {
     /// Note: that it does not guarantee the final data to be sent.
     /// To be cautious, you must manually call `flush`.
+    #[tracing::instrument(skip(self, cx, buf))]
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
