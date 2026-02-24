@@ -64,6 +64,7 @@ pub(crate) struct Stream<'a, IO, C> {
     pub(crate) session: &'a mut C,
     pub(crate) eof: bool,
     pub(crate) need_flush: bool,
+    pub(crate) sent_offset: usize,
 }
 
 impl<'a, IO: AsyncRead + AsyncWrite + Unpin, C, SD> Stream<'a, IO, C>
@@ -80,6 +81,7 @@ where
             eof: false,
             // Whether a previous flush returned pending, or a write occured without a flush.
             need_flush: false,
+            sent_offset: 0,
         }
     }
 
@@ -285,7 +287,7 @@ where
         cx: &mut Context,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        let mut pos = 0;
+        let mut pos = self.sent_offset;
 
         while pos != buf.len() {
             let mut would_block = false;
@@ -294,6 +296,7 @@ where
                 Ok(n) => pos += n,
                 Err(err) => return Poll::Ready(Err(err)),
             };
+            self.sent_offset = pos;
 
             while self.session.wants_write() {
                 match self.write_io(cx) {
@@ -308,10 +311,11 @@ where
 
             return match (pos, would_block) {
                 (0, true) => Poll::Pending,
-                (n, true) => Poll::Ready(Ok(n)),
+                (pos, true) => Poll::Pending,
                 (_, false) => continue,
             };
         }
+        self.sent_offset = 0;
 
         Poll::Ready(Ok(pos))
     }
